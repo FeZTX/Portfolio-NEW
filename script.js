@@ -23,6 +23,8 @@
     const cursorGlow = document.getElementById('cursor-glow');
     const cursorDot = document.getElementById('cursor-dot');
 
+    const scrollHint = document.getElementById('scroll-hint');
+
 
     // ============================================================
     // CONFIGURAÇÕES
@@ -89,9 +91,14 @@
     // ESTADO
     // ============================================================
 
-    let frames = [];
+    const MAX_POOL = 80;
+    const PRELOAD_AHEAD = 40;
+    const PRELOAD_BEHIND = 10;
+
+    let framePool = new Map();
     let loaded = 0;
     let lastIdx = -1;
+    let loadingFrames = new Set();
 
     let ticking = false;
 
@@ -110,11 +117,27 @@
 
 
     function draw(i) {
-        if (!frames[i]) return;
+        let img = framePool.get(i);
+        if (!img) {
+            let best = lastIdx;
+            let bestDist = Infinity;
+            for (const [idx] of framePool) {
+                const d = Math.abs(idx - i);
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = idx;
+                }
+            }
+            if (best >= 0 && framePool.has(best)) {
+                img = framePool.get(best);
+            } else {
+                preloadRange(i);
+                return;
+            }
+        }
 
         lastIdx = i;
 
-        const img = frames[i];
         const imgW = img.naturalWidth || img.width;
         const imgH = img.naturalHeight || img.height;
         const cvsW = canvas.width;
@@ -829,6 +852,8 @@
 
     function onScroll() {
 
+        scrollHint.classList.remove('visible');
+
         if (ticking) {
             return;
         }
@@ -850,6 +875,7 @@
             if (f !== lastIdx) {
 
                 draw(f);
+                preloadRange(f);
             }
 
 
@@ -863,130 +889,107 @@
 
 
     // ============================================================
-    // LOAD FRAME
+    // POOL: EVICT FRAMES FAR FROM CURRENT
     // ============================================================
 
-    function loadFrame(index) {
+    function evictPool(currentIdx) {
+        if (framePool.size <= MAX_POOL) return;
 
-        return new Promise((resolve) => {
+        const entries = [...framePool.keys()];
+        entries.sort(
+            (a, b) =>
+                Math.abs(a - currentIdx) -
+                Math.abs(b - currentIdx)
+        );
 
-            const img = new Image();
-
-
-            img.onload = () => {
-
-                frames[index] = img;
-
-                loaded++;
-
-
-                // ------------------------------------------------
-                // PRIMEIRO FRAME
-                // ------------------------------------------------
-
-                if (loaded === 1) {
-
-                    sizeCanvas();
-
-                    draw(0);
+        while (framePool.size > MAX_POOL) {
+            const farthest = entries.pop();
+            framePool.delete(farthest);
+        }
+    }
 
 
-                    loader.classList.add(
-                        'hidden'
-                    );
+    // ============================================================
+    // POOL: PRELOAD A RANGE AROUND CURRENT
+    // ============================================================
+
+    function preloadRange(currentIdx) {
+        const total = getTotal();
+        const start = Math.max(0, currentIdx - PRELOAD_BEHIND);
+        const end = Math.min(total - 1, currentIdx + PRELOAD_AHEAD);
+
+        for (let i = start; i <= end; i++) {
+            if (
+                !framePool.has(i) &&
+                !loadingFrames.has(i)
+            ) {
+                loadSingleFrame(i);
+            }
+        }
+
+        evictPool(currentIdx);
+    }
 
 
-                    setTimeout(() => {
+    // ============================================================
+    // LOAD SINGLE FRAME (POOL)
+    // ============================================================
 
-                        loader.remove();
+    function loadSingleFrame(index) {
+        if (framePool.has(index) || loadingFrames.has(index)) return;
 
-                    }, 400);
+        loadingFrames.add(index);
 
+        const img = new Image();
 
-                    // --------------------------------------------
-                    // SCROLL
-                    // --------------------------------------------
+        img.onload = () => {
+            framePool.set(index, img);
+            loadingFrames.delete(index);
+            loaded++;
 
-                    window.addEventListener(
-                        'scroll',
-                        onScroll,
-                        { passive: true }
-                    );
+            if (loaded === 1) {
+                sizeCanvas();
+                draw(0);
 
+                loader.classList.add('hidden');
 
-                    // --------------------------------------------
-                    // RESIZE
-                    // --------------------------------------------
+                setTimeout(() => {
+                    loader.remove();
+                    scrollHint.classList.add('visible');
+                }, 400);
 
-                    window.addEventListener(
-                        'resize',
-                        () => {
+                window.addEventListener(
+                    'scroll',
+                    onScroll,
+                    { passive: true }
+                );
 
-                            const current =
-                                frames[
-                                    lastIdx >= 0
-                                        ? lastIdx
-                                        : 0
-                                ];
-
-
-                            if (current) {
-
-                                sizeCanvas();
-
-                                draw(
-                                    lastIdx >= 0
-                                        ? lastIdx
-                                        : 0
-                                );
-                            }
-
-
-                            updateText();
-                        }
-                    );
-
-
-                    // --------------------------------------------
-                    // ESTADO INICIAL
-                    // --------------------------------------------
-
+                window.addEventListener('resize', () => {
+                    const idx = lastIdx >= 0 ? lastIdx : 0;
+                    if (framePool.has(idx)) {
+                        sizeCanvas();
+                        draw(idx);
+                    }
                     updateText();
-                }
+                });
 
+                updateText();
+            }
 
-                // ------------------------------------------------
-                // LOADER
-                // ------------------------------------------------
+            const pct = Math.round(
+                (loaded / getTotal()) * 100
+            );
+            loaderBar.style.width = `${pct}%`;
+            loaderText.textContent = `${pct}%`;
+        };
 
-                const pct =
-                    Math.round(
-                        (loaded / getTotal()) * 100
-                    );
+        img.onerror = () => {
+            loadingFrames.delete(index);
+            loaded++;
+        };
 
-
-                loaderBar.style.width =
-                    `${pct}%`;
-
-                loaderText.textContent =
-                    `${pct}%`;
-
-
-                resolve();
-            };
-
-
-            img.onerror = () => {
-
-                loaded++;
-
-                resolve();
-            };
-
-
-            img.src =
-                `${getFrameFolder()}/frame_${String(index + 1).padStart(3, '0')}.jpg`;
-        });
+        img.src =
+            `${getFrameFolder()}/frame_${String(index + 1).padStart(3, '0')}.jpg`;
     }
 
 
@@ -1039,44 +1042,22 @@
 
 
         // --------------------------------------------------------
-        // LOAD EM LOTES
+        // LOAD INICIAL: só os primeiros frames + janela à frente
         // --------------------------------------------------------
 
-        const batch = 20;
+        const initialBatch = Math.min(PRELOAD_AHEAD + PRELOAD_BEHIND + 1, getTotal());
+        const slice = [];
 
-
-        for (
-            let i = 0;
-            i < getTotal();
-            i += batch
-        ) {
-
-            const slice = [];
-
-
-            for (
-                let j = i;
-                j < Math.min(
-                    i + batch,
-                    getTotal()
-                );
-                j++
-            ) {
-
-                slice.push(
-                    loadFrame(j)
-                );
-            }
-
-
-            await Promise.all(slice);
-
-
-            await new Promise(
-                (resolve) =>
-                    setTimeout(resolve, 0)
+        for (let j = 0; j < initialBatch; j++) {
+            slice.push(
+                new Promise((resolve) => {
+                    loadSingleFrame(j);
+                    resolve();
+                })
             );
         }
+
+        await Promise.all(slice);
     }
 
 
@@ -1200,7 +1181,11 @@
     // CURSOR ANIMATION
     // ============================================================
 
+    let cursorAnimFrame = null;
+
     function animateCursor() {
+
+        if (isMobile()) return;
 
         const glowEase = 0.08;
         const dotEase = 0.18;
@@ -1238,13 +1223,16 @@
             `${dotY}px`;
 
 
-        requestAnimationFrame(
-            animateCursor
-        );
+        cursorAnimFrame =
+            requestAnimationFrame(
+                animateCursor
+            );
     }
 
 
-    animateCursor();
+    if (!isMobile()) {
+        animateCursor();
+    }
 
 
     // ============================================================
@@ -1423,5 +1411,98 @@
                 }
             );
         });
+
+
+    // ============================================================
+    // IMAGE MODAL
+    // ============================================================
+
+    const imgModalOverlay =
+        document.getElementById('image-modal-overlay');
+
+    const imgModalImg =
+        document.getElementById('image-modal-img');
+
+    const imgModalClose =
+        document.getElementById('image-modal-close');
+
+    const imgModalPrev =
+        document.getElementById('image-modal-prev');
+
+    const imgModalNext =
+        document.getElementById('image-modal-next');
+
+    let imgModalSlides = [];
+    let imgModalIdx = 0;
+
+
+    function openImageModal(slide, slides) {
+        imgModalSlides = Array.from(slides);
+        imgModalIdx = imgModalSlides.indexOf(slide);
+
+        if (imgModalIdx < 0) return;
+
+        imgModalImg.src = slide.src;
+        imgModalImg.alt = slide.alt;
+
+        imgModalOverlay.classList.add('active');
+        document.body.style.overflow = 'hidden';
+    }
+
+
+    function closeImageModal() {
+        imgModalOverlay.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+
+    function navigateImageModal(dir) {
+        imgModalIdx =
+            (imgModalIdx + dir + imgModalSlides.length) %
+            imgModalSlides.length;
+
+        imgModalImg.src = imgModalSlides[imgModalIdx].src;
+        imgModalImg.alt = imgModalSlides[imgModalIdx].alt;
+    }
+
+
+    imgModalClose.addEventListener('click', closeImageModal);
+
+    imgModalOverlay.addEventListener('click', function(e) {
+        if (e.target === imgModalOverlay) {
+            closeImageModal();
+        }
+    });
+
+    imgModalPrev.addEventListener('click', function() {
+        navigateImageModal(-1);
+    });
+
+    imgModalNext.addEventListener('click', function() {
+        navigateImageModal(1);
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (!imgModalOverlay.classList.contains('active')) return;
+
+        if (e.key === 'Escape') closeImageModal();
+        if (e.key === 'ArrowLeft') navigateImageModal(-1);
+        if (e.key === 'ArrowRight') navigateImageModal(1);
+    });
+
+
+    document.querySelectorAll('.carousel').forEach(function(carousel) {
+
+        var track = carousel.querySelector('.carousel-track');
+        var slides = track.querySelectorAll('.carousel-slide');
+
+        slides.forEach(function(slide) {
+            slide.style.cursor = 'zoom-in';
+
+            slide.addEventListener('click', function() {
+                openImageModal(slide, slides);
+            });
+        });
+    });
 
 })();
